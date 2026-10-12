@@ -1,517 +1,76 @@
-# Hierarchical Federated Learning: A Comparative Study of Aggregation Strategies Under Non-IID Data
+# Hierarchical Federated Learning under Non IID Data
 
-## 📌 Overview
+The study compares five aggregation rules under one fixed protocol: **FedAvg**, **FedProx**, **FedNova**, **HierFAVG** and **FedMA-lite** (a simplified FedMA). It uses MNIST, Fashion-MNIST and CIFAR-10, split across 20 clients with a Dirichlet(α = 0.1) label partition, and repeats every configuration over five seeds (153 runs in total).
 
-This repository contains the implementation and experimental evaluation of **Hierarchical Federated Learning (HFL)** under strongly non-IID client data.
+## Main results
 
-The study investigates two key questions:
+| Result | Value |
+|---|---|
+| Upload to the global server, HierFAVG vs. two-tier (4 edge servers, 20 clients) | 80% lower |
+| HierFAVG accuracy vs. FedAvg | within 0.1 pp on all datasets (equal by construction with one edge aggregation per global round) |
+| FedProx vs. FedAvg, CIFAR-10 | +0.85 pp (95% CI +0.46 to +1.24), ahead on 5/5 seeds; the only difference that survives Holm correction |
+| FedNova vs. FedAvg, Fashion-MNIST / CIFAR-10 | −1.87 pp / −2.54 pp, behind on 4/5 seeds; the gap disappears at α ≥ 0.5 and with plain local SGD |
+| FedMA-lite vs. FedAvg | within 0.3 pp on all datasets |
 
-1. **Does hierarchical federated learning actually reduce communication overhead?**
-2. **How does the choice of aggregation algorithm affect model performance under highly heterogeneous data?**
+All numbers are seed means; see the paper for standard deviations, paired tests and the FedNova ablation.
 
-We compare five federated learning approaches under a common experimental protocol:
+## Repository contents
 
-* **FedAvg**
-* **FedProx**
-* **FedNova**
-* **HierFAVG**
-* **FedMA-lite** — a simplified implementation of FedMA
+| File | What it is |
+|---|---|
+| `performed_mnist_multiseed_.ipynb` | MNIST experiments reported in the paper, with all outputs (main comparison and skew sweep) |
+| `performed-fmnist-multiseed.ipynb` | Fashion-MNIST experiments reported in the paper, with outputs (main comparison, skew sweep, FedNova ablation) |
+| `performed-cifar10-multiseed.ipynb` | CIFAR-10 experiments reported in the paper, with outputs (main comparison, skew sweep, FedNova ablation) |
+| `mnist 1.2.ipynb`, `fmnist 1.2.ipynb`, `CIFAR10 1.2.ipynb` | Earlier single-seed (seed 42) notebooks |
+| `federated_core.py` | Version 1.0 of the shared code, imported by the single-seed notebooks |
+| `LICENSE` | MIT licence |
 
-Experiments are conducted on:
+**Which code produced the paper's results.** Each multi-seed notebook writes three files to disk in its first cells and then runs them:
 
-* MNIST
-* Fashion-MNIST
-* CIFAR-10
+- `federated_core.py` **version 1.1**: partitioning, local training and the five aggregation rules;
+- `run_experiments.py`: the resumable multi-seed runner;
+- `tests/test_core.py`: unit tests for the aggregation rules.
 
-with a strongly non-IID **Dirichlet distribution (α = 0.1)** across **20 clients**.
+Version 1.1 adds three things to the version-1.0 file in this repository: the momentum-corrected FedNova normaliser (FedNova-M), FedMA-lite applying its channel permutation to the inputs of the second convolutional layer as well as the first, and per-client logging of local step counts and update norms. With default arguments it reproduces version 1.0. All results in the paper use version 1.1. Running a multi-seed notebook from the repository folder replaces the version-1.0 `federated_core.py` with version 1.1.
 
----
+## Reproducing the experiments
 
-## 🎯 Research Objectives
+1. Open one of the three `performed…multiseed` notebooks in Colab or Kaggle and select a GPU runtime (the paper's runs used an NVIDIA Tesla T4 with PyTorch 2.10–2.11).
+2. Run all cells. The first cells write the code, run the unit tests, and run a two-round smoke test of every code path; the remaining cells run the experiments.
+3. The last cell packs that dataset's per-run logs into `results_mnist.zip`, `results_fmnist.zip` or `results_cifar10.zip`.
 
-The main objectives of this work are:
+The three notebooks are independent and can run at the same time. Finished runs are skipped, so an interrupted notebook can simply be run again in the same session. One 25-round run takes about 7 minutes on a T4 (FedProx about 12).
 
-* Evaluate the communication benefits of hierarchical FL.
-* Compare different aggregation strategies under strong statistical heterogeneity.
-* Study how local training-step imbalance affects FedNova.
-* Investigate whether hierarchical aggregation changes model accuracy.
-* Evaluate the robustness of the algorithms across multiple random seeds.
-* Analyze the effect of different levels of data heterogeneity.
-* Review existing HFL privacy and security mechanisms.
-
-> **Note:** Privacy and security mechanisms are reviewed in the associated study but are **not experimentally evaluated in this repository**.
-
----
-
-## 🏗️ Federated Learning Setup
-
-The experimental architecture consists of:
-
-```text
-                    Global Server
-                         │
-             ┌───────────┼───────────┐
-             │           │           │
-          Edge 1      Edge 2      Edge 3      Edge 4
-             │           │           │
-          Clients      Clients      Clients   Clients
-```
-
-### Configuration
-
-| Parameter              | Setting                                        |
-| ---------------------- | ---------------------------------------------- |
-| Number of clients      | 20                                             |
-| Number of edge servers | 4                                              |
-| Clients per edge       | 5                                              |
-| Local epochs           | 5                                              |
-| Data distribution      | Dirichlet                                      |
-| Dirichlet α            | 0.1                                            |
-| Datasets               | MNIST, Fashion-MNIST, CIFAR-10                 |
-| Random seeds           | 5                                              |
-| Client participation   | Full participation                             |
-| Aggregation methods    | FedAvg, FedProx, FedNova, HierFAVG, FedMA-lite |
-
-Because clients contain different amounts of data, the number of local optimization steps varies substantially, approximately from **5 to 1,745 steps per client**.
-
----
-
-## 🔬 Algorithms Evaluated
-
-### 1. FedAvg
-
-FedAvg is used as the primary baseline.
-
-Client models are aggregated according to the number of training samples held by each client.
-
-```text
-Client Models
-     ↓
-Local Training
-     ↓
-Weighted Model Averaging
-     ↓
-Global Model
-```
-
----
-
-### 2. FedProx
-
-FedProx extends FedAvg by introducing a proximal term during local optimization.
-
-This is intended to reduce the impact of client drift caused by heterogeneous data and computation.
-
----
-
-### 3. FedNova
-
-FedNova performs normalization based on the amount of local optimization performed by each client.
-
-This makes it particularly relevant when clients perform different numbers of local optimization steps.
-
-In this study, the fixed **five-local-epoch** setting combined with unequal client dataset sizes creates substantial differences in client step counts.
-
----
-
-### 4. HierFAVG
-
-HierFAVG introduces an intermediate aggregation layer.
-
-Instead of sending every client update directly to the global server:
-
-```text
-Clients
-   ↓
-Edge Aggregation
-   ↓
-Global Aggregation
-```
-
-With **20 clients and 4 edge clusters**, this configuration reduces communication with the global server by approximately **80%**.
-
-An important observation is that with:
-
-* full client participation, and
-* exactly one edge aggregation per global round,
-
-the resulting aggregate is mathematically equivalent to FedAvg.
-
-Therefore, the communication advantage is demonstrated, but the accuracy advantage of HFL under multiple edge rounds remains an open experimental question.
-
----
-
-### 5. FedMA-lite
-
-FedMA-lite is a simplified implementation inspired by Federated Matched Averaging (FedMA).
-
-It provides an additional aggregation strategy for comparison with conventional parameter averaging approaches.
-
----
-
-## 📊 Experimental Results
-
-### Communication
-
-Using four edge clusters for twenty clients:
-
-**HierFAVG reduces traffic to the global server by approximately 80%.**
-
-This demonstrates the communication-saving potential of hierarchical FL.
-
-However, the experiment uses one edge aggregation per global round. Therefore, additional experiments with multiple local edge rounds are required to determine how HFL behaves when edge aggregation is performed more frequently.
-
----
-
-### Accuracy Comparison
-
-The main observations are:
-
-| Algorithm  | Main Observation                                         |
-| ---------- | -------------------------------------------------------- |
-| FedAvg     | Baseline                                                 |
-| HierFAVG   | Within 0.1 percentage points of FedAvg                   |
-| FedMA-lite | Within 0.3 percentage points of FedAvg                   |
-| FedProx    | Similar to FedAvg except on CIFAR-10                     |
-| FedNova    | Similar on MNIST but lower on Fashion-MNIST and CIFAR-10 |
-
-#### FedProx
-
-On CIFAR-10, FedProx achieved approximately **0.85 percentage points higher accuracy** than FedAvg across all five seeds.
-
-After correction for multiple comparisons, this was the only reported difference that remained statistically significant.
-
-#### FedNova
-
-FedNova matched FedAvg on MNIST but showed lower performance on:
-
-* Fashion-MNIST: approximately **1.9 pp lower**
-* CIFAR-10: approximately **2.5 pp lower**
-
-The CIFAR-10 deficit occurred on **four out of five seeds**, with considerable variation between seeds.
-
-Interestingly, when the Dirichlet parameter was increased to:
-
-```text
-α ≥ 0.5
-```
-
-the observed performance gap disappeared.
-
----
-
-## 🧪 Investigation of FedNova
-
-The experiments also investigate why FedNova behaves differently under strong heterogeneity.
-
-With a fixed number of local epochs, clients possess different amounts of training data. Consequently, their local step counts can differ dramatically.
-
-FedNova's step normalization causes client weights to become approximately uniform and causes their total to increase to approximately:
-
-```text
-1.2 – 1.9
-```
-
-However, the magnitude of this normalization distortion did **not** explain the observed performance deficit across random seeds.
-
-Additional experiments using the momentum-corrected normalizer were also performed.
-
-The deficit persisted with the momentum-corrected normalizer but disappeared when using plain local SGD.
-
-Therefore:
-
-> The underlying cause of the FedNova performance deficit under this experimental setting remains unresolved.
-
----
-
-## 📈 Data Heterogeneity
-
-The experiments primarily use:
-
-```text
-Dirichlet α = 0.1
-```
-
-which produces strongly non-IID client distributions.
-
-Additional experiments show that the FedNova performance gap disappears at approximately:
-
-```text
-α ≥ 0.5
-```
-
-This suggests that the observed behavior is strongly connected to the degree of statistical heterogeneity.
-
----
-
-## 🔁 Reproducibility
-
-Every experimental configuration is repeated using **five random seeds**.
-
-This is important because federated learning under highly non-IID data can exhibit substantial variation between random partitions and training runs.
-
-The repository therefore evaluates not only average performance but also variation across independent seeds.
-
----
-
-## 🧮 Experimental Protocol
-
-The general experimental pipeline is:
-
-```text
-Dataset
-   ↓
-Dirichlet Non-IID Partitioning
-   ↓
-20 Clients
-   ↓
-5 Local Epochs
-   ↓
-Client Updates
-   ↓
-Selected Aggregation Algorithm
-   ↓
-Global Model
-   ↓
-Evaluation
-   ↓
-Repeat Across 5 Seeds
-```
-
-For HFL:
-
-```text
-Client Training
-      ↓
-Local Client Updates
-      ↓
-Edge Aggregation
-      ↓
-Global Server
-      ↓
-Global Model
-      ↓
-Next Round
-```
-
----
-
-## 📁 Repository Structure
-
-A recommended repository structure is:
-
-```text
-.
-├── README.md
-│
-├── notebooks/
-│   ├── FedAvg.ipynb
-│   ├── FedProx.ipynb
-│   ├── FedNova.ipynb
-│   ├── HierFAVG.ipynb
-│   └── FedMA_lite.ipynb
-│
-├── src/
-│   ├── datasets/
-│   ├── clients/
-│   ├── servers/
-│   ├── aggregation/
-│   ├── models/
-│   └── utils/
-│
-├── results/
-│   ├── MNIST/
-│   ├── FashionMNIST/
-│   └── CIFAR10/
-│
-├── figures/
-│   ├── accuracy/
-│   ├── communication/
-│   └── heterogeneity/
-│
-└── requirements.txt
-```
-
----
-
-## ⚙️ Installation
-
-Clone the repository:
+After the first cells have written the files, the runner can also be used from the command line:
 
 ```bash
-git clone <YOUR-REPOSITORY-URL>
-cd <YOUR-REPOSITORY-NAME>
+python tests/test_core.py                          # unit tests (seconds)
+python run_experiments.py --smoke                  # every code path, 2 rounds (minutes)
+python run_experiments.py --stage all --out results
 ```
 
-Create a virtual environment:
+Stages: `main` (5 algorithms × 3 datasets × seeds 42–46, α = 0.1, 25 rounds), `sweep` (FedAvg and FedNova at α = 0.5 and 1.0, 10 rounds) and `ablation` (FedNova-M, FedAvg-SGD and FedNova-SGD on Fashion-MNIST and CIFAR-10, seeds 42–44).
 
-```bash
-python -m venv venv
-```
+Requirements: Python 3 with `torch`, `torchvision`, `numpy`, `scipy`, `pandas` and `matplotlib` (all preinstalled on Colab and Kaggle).
 
-Activate it.
+## Protocol
 
-### Windows
+| Setting | Value |
+|---|---|
+| Clients and partition | 20 clients; Dirichlet(α) per class, α = 0.1 (main), 0.5 and 1.0 (sweep) |
+| Local training | 5 epochs per round, batch size 32, SGD with learning rate 0.01 and momentum 0.9, no weight decay |
+| Participation and rounds | all clients every round; 25 rounds (10 in the sweep) |
+| Local steps per client | 5 × ⌈n_k / 32⌉, from 5 to 1,745 across seeds, because client data volumes differ |
+| FedProx | μ = 0.01 (not tuned per dataset) |
+| FedNova | each client's update divided by its step count τ_k (FedNova-M: by the momentum-corrected ‖a_k‖₁) |
+| HierFAVG | 4 edge servers with clients assigned at random for each seed (sizes 5, 3, 6 and 6 for seed 42); one edge aggregation per global round |
+| FedMA-lite | conv1 channels of each client matched to client 1 with the Hungarian algorithm; the permutation is also applied to conv2's inputs |
+| Seeds | 42–46 (ablation 42–44); each seed fixes the partition, edge clusters, model initialisation and minibatch order |
 
-```bash
-venv\Scripts\activate
-```
+## Limitations
 
-### Linux/macOS
+The study uses 20 clients, 25 rounds, small CNNs, full participation and ideal networks; FedProx's μ is untuned and FedMA is simplified. HierFAVG was run with one edge aggregation per global round, so its accuracy is expected to match FedAvg's; schedules with several edge rounds per global round are not tested. Privacy mechanisms are reviewed in the paper but not evaluated.
 
-```bash
-source venv/bin/activate
-```
+## Licence
 
-Install dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
----
-
-## ▶️ Running the Experiments
-
-The notebooks contain the individual implementations and experiments.
-
-Run the notebooks in the following order:
-
-```text
-1. FedAvg
-2. FedProx
-3. FedNova
-4. HierFAVG
-5. FedMA-lite
-```
-
-For reproducibility, use the same:
-
-* dataset partitioning strategy,
-* number of clients,
-* local epochs,
-* global rounds,
-* random seeds,
-* model architecture,
-* evaluation procedure.
-
----
-
-## 📚 Datasets
-
-### MNIST
-
-Handwritten digit classification containing ten classes.
-
-### Fashion-MNIST
-
-A ten-class image classification dataset consisting of clothing and fashion items.
-
-### CIFAR-10
-
-A ten-class natural-image classification benchmark with substantially more complex visual patterns than MNIST and Fashion-MNIST.
-
----
-
-## 🔐 Privacy and Security
-
-The associated literature review covers privacy and security mechanisms proposed for hierarchical federated learning, including mechanisms designed to protect client information and secure communication.
-
-However:
-
-> **Privacy and security mechanisms are reviewed but are not experimentally evaluated in this implementation.**
-
-The primary experimental focus is aggregation, communication, heterogeneity, and model performance.
-
----
-
-## 🔎 Key Findings
-
-The study provides several observations:
-
-1. **Hierarchical FL can substantially reduce global-server communication.**
-2. **HierFAVG can achieve nearly identical accuracy to FedAvg when one edge aggregation is performed per global round.**
-3. **FedMA-lite remains close to FedAvg under the tested protocol.**
-4. **FedProx provides a measurable improvement over FedAvg on CIFAR-10 under strong heterogeneity.**
-5. **FedNova exhibits a notable performance deficit on Fashion-MNIST and CIFAR-10 when α = 0.1.**
-6. **The FedNova deficit disappears under weaker heterogeneity (α ≥ 0.5).**
-7. **The observed FedNova deficit cannot be explained solely by the magnitude of its normalization distortion.**
-8. **Further experiments are required to identify the underlying cause of the FedNova behavior.**
-
----
-
-## 🚧 Limitations
-
-The current study has several limitations:
-
-* Only **20 clients** are evaluated.
-* The HFL experiment uses **four edge clusters**.
-* Full client participation is used.
-* Only **one edge aggregation per global round** is evaluated.
-* The experiments use **five local epochs**.
-* Privacy and security mechanisms are reviewed but not experimentally evaluated.
-* FedMA is represented by a simplified **FedMA-lite** implementation.
-* The underlying cause of the observed FedNova deficit remains unresolved.
-
----
-
-## 🔮 Future Work
-
-Future experiments can investigate:
-
-* Multiple edge aggregation rounds per global round.
-* Larger numbers of clients and edge servers.
-* Partial client participation.
-* Different client-to-edge assignment strategies.
-* More local epochs and heterogeneous computation.
-* Additional datasets.
-* More sophisticated FedMA implementations.
-* Differential privacy in HFL.
-* Secure aggregation.
-* Byzantine-robust aggregation.
-* Communication and computation energy consumption.
-* Adaptive client-edge clustering.
-* Deeper investigation of FedNova under extreme non-IID distributions.
-
----
-
-## 📖 References
-
-The implementations are based on the following foundational approaches:
-
-```text
-[1] FedAvg
-[2] FedProx
-[3] FedNova
-[4] HierFAVG
-[5] FedMA
-```
-
-Full bibliographic information should be added to this section according to the citation format used in the associated paper.
-
----
-
-## 👨‍🔬 Research Focus
-
-This repository is intended to support research into:
-
-* Federated Learning
-* Hierarchical Federated Learning
-* Non-IID Data
-* Federated Optimization
-* Communication-Efficient FL
-* Distributed Machine Learning
-* Edge Computing
-* Privacy-Preserving Federated Learning
-
----
-
-## 📜 License
-
-Add the appropriate license for the repository, for example:
-
-```text
-MIT License
-```
-
-if the project is intended to use the MIT License.
+MIT; see [LICENSE](LICENSE).
